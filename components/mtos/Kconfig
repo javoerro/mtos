@@ -1,0 +1,59 @@
+menu "MToS - Memory Transfer over Serial"
+
+    config MTOS_UART_PORT
+        int "UART port to use"
+        default 2
+        help
+            Sets UART port for use in MToS
+
+    config MTOS_UART_BAUD_RATE
+        int "Comunication speed"
+        default 115200
+        help
+            Baud rate
+
+
+    config MTOS_UART_TX_PIN
+        int "UART pin used for TX"
+        default -1
+        help
+            Sets UART pin for TX
+
+    config MTOS_UART_RX_PIN
+        int "UART pin used for RX"
+        default -1
+        help
+            Sets UART pin used for RX
+
+    config MTOS_UART_TIMEOUT
+        int "Timeout for data RX"
+        default 10
+        help
+            Caracters will be waited this amount of time, in case exceeded, data parsing will start
+
+    config MTOS_BUFFER_SIZE
+        int "Comunication buffer"
+        default 4096
+        help
+            Sets size of buffer for data exchange, affects the max chunk size. Not less than 64
+
+    config MTOS_BUFFER_LEGACY
+        int "Minimum buffer legacy between iterations"
+        default 32
+        help
+            As the data is parsed, the buffer will be flushed leaving this remainder available for the next iteration.
+            Not less than 32, not more than 128
+
+    config MTOS_CALL_QUEUE_LENGTH
+        int "Number of calls that can be queued"
+        default 4
+        help
+            Length of call queue
+
+    config MTOS_EVT_QUEUE_SIZE
+        int "Number of events that can be queued"
+        default 16
+        help
+            Length of event queue
+
+endmenu
