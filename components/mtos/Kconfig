@@ -25,11 +25,17 @@ menu "MToS - Memory Transfer over Serial"
         help
             Sets UART pin used for RX
 
-    config MTOS_UART_TIMEOUT
-        int "Timeout for data RX"
+    config MTOS_UART_STEP_MS
+        int "Step time for data RX"
         default 10
         help
             Caracters will be waited this amount of time, in case exceeded, data parsing will start
+
+    config MTOS_DEFAULT_TIMEOUT
+        int "Default timeout for calls in master and slave"
+        default 10000
+        help
+            Default timeout for calls in master and slave
 
     config MTOS_BUFFER_SIZE
         int "Comunication buffer"

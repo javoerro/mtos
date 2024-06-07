@@ -9,8 +9,9 @@
  * queues, and UART configuration.
  *
  * @param evt_callback Pointer to the event handler callback function.
+ * @param usr_data     Pointer to the user data to be passed to the event handler.
  */
-void mtos_init(mtos_event_handler_t evt_callback);
+void mtos_init(mtos_event_handler_t evt_callback, void* usr_data);
 
 /**
  * @brief Creates a new blob in the MTOS list.

@@ -603,12 +603,13 @@ int mtos_return_element(char name[16], void* element, size_t index)
 #define MTOS_BUFFER_EFFECTIVE (((CONFIG_MTOS_BUFFER_SIZE)&(0xFFFFFF))+CONFIG_MTOS_BUFFER_LEGACY)
 #define MTOS_BUFFER_AVAILABLE ((CONFIG_MTOS_BUFFER_SIZE)&(0xFFFFFF))
 #define MTOS_BUFFER_SLAVE (2*CONFIG_MTOS_BUFFER_LEGACY)
-#define MTOS_EVT_POST(x,y,z) esp_event_post_to(mtos_loop_handle,MTOS_EVENTS,x,y,z,CONFIG_MTOS_UART_TIMEOUT/portTICK_PERIOD_MS)
+#define MTOS_EVT_POST(x,y,z) esp_event_post_to(mtos_loop_handle,MTOS_EVENTS,x,y,z,CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS)
 
 static QueueHandle_t mtos_call_queue;
 static QueueHandle_t mtos_uart_queue;
 static esp_event_loop_handle_t mtos_loop_handle;
-static int uart_timeout_limit = 10000;
+static int uart_master_timeout = CONFIG_MTOS_DEFAULT_TIMEOUT;
+static int uart_slave_timeout = CONFIG_MTOS_DEFAULT_TIMEOUT;
 static unsigned int chunk_current_max = MTOS_BUFFER_AVAILABLE;
 static uint32_t to;
 
@@ -621,7 +622,7 @@ int mtos_call(char* name, unsigned int timeout_ms, unsigned int max_chunk_size)
         if (!node->slave) {
             ESP_LOGI(TAG,"found %s",node->name);
             xQueueSend(mtos_call_queue,&node,portMAX_DELAY);
-            uart_timeout_limit = timeout_ms;
+            uart_master_timeout = timeout_ms;
             if ((max_chunk_size <= MTOS_BUFFER_AVAILABLE) && (max_chunk_size >= CONFIG_MTOS_BUFFER_LEGACY)) {
                 chunk_current_max = max_chunk_size;
             }
@@ -660,7 +661,7 @@ static void mtos_main_uart(void* pvParameters)
                 last_rx_time = MILLIS(0);
             }
             else {
-                if(delta_ms > CONFIG_MTOS_UART_TIMEOUT) {
+                if(delta_ms > CONFIG_MTOS_UART_STEP_MS) {
                     break;
                 }
                 else {
@@ -668,7 +669,9 @@ static void mtos_main_uart(void* pvParameters)
                 }
             }
         }
-        if (xQueueReceive(mtos_uart_queue,&uart_call,portMAX_DELAY) == pdTRUE) {
+        ESP_LOGD("ultradbg","messages waiting now: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+        ESP_LOGD("ultradbg","[[[[[[[[RECIEVING QUEUE FROM read_bytes > uart_main]]]]]]]]");
+        if (xQueueReceive(mtos_uart_queue,&uart_call,2*CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) == pdTRUE) {
             last_rx_bytes = *uart_call.rx_bytes;
             uart_result = uart_read_bytes(CONFIG_MTOS_UART_PORT, uart_call.buffer+*uart_call.rx_bytes, buffered_size, 0);
             *uart_call.rx_bytes += (uart_result > 0 ? uart_result : 0);
@@ -677,24 +680,81 @@ static void mtos_main_uart(void* pvParameters)
                 ESP_LOG_BUFFER_HEXDUMP(TAG,uart_call.buffer,*uart_call.rx_bytes,ESP_LOG_INFO);
                 ESP_LOGI(TAG,"rx_bytes pos: %u <<<",*uart_call.rx_bytes);
             }
-            xQueueSend(mtos_uart_queue,&uart_call,portMAX_DELAY);
             xTaskNotifyGive(uart_call.th);
+            uart_call.th = xTaskGetCurrentTaskHandle();
+            do {
+                ESP_LOGD("ultradbg","!!messages waiting now: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+                ESP_LOGD("ultradbg","]]]]]]]]QUEUE SENDIG FROM  uart_main > read_bytes[[[[[[[[");
+            } while (xQueueSend(mtos_uart_queue,&uart_call,CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) != pdTRUE);
+            ulTaskNotifyTake(pdTRUE,2*CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS);
+            vTaskDelay(1/portTICK_RATE_MS);
         }
     }
 }
 
+
 static size_t mtos_read_bytes(void *buf, size_t *length, void *ptr)
 {
-    mtos_uart_vessel_t new = {
+    ESP_LOGD("ultradbg","/entering mtos_read_bytes\\");
+    mtos_uart_vessel_t input = {
         .buffer = buf,
         .rx_bytes = length,
         .header = ptr,
         .th = xTaskGetCurrentTaskHandle()
     };
-    xQueueSend(mtos_uart_queue,&new,portMAX_DELAY);
-    ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
-    xQueueReceive(mtos_uart_queue,&new,portMAX_DELAY);
-    return *new.rx_bytes;
+    if (uxQueueMessagesWaiting(mtos_uart_queue)) {
+        ESP_LOGD("ultradbg","retained messages: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+        mtos_uart_vessel_t retained = {};
+        if (xQueueReceive(mtos_uart_queue,&retained,
+            CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) == pdTRUE) {
+            ESP_LOGD("ultradbg","retained vessel recieved");
+            if (retained.th != xTaskGetCurrentTaskHandle()) {
+                ESP_LOGD("ultradbg","retained vessel from uart_main (%u bytes)",*retained.rx_bytes);
+                ESP_LOG_BUFFER_HEXDUMP("ultradbg",retained.buffer,*retained.rx_bytes,ESP_LOG_DEBUG);
+                ESP_LOGD("ultradbg","now retained messages: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+                return *retained.rx_bytes;
+            }
+            else {
+                ESP_LOGD("ultradbg","retained vessel not for this task");
+                return *input.rx_bytes;
+            }
+        }
+        else {
+            ESP_LOGD("ultradbg","retained vessel not recieved");
+            return *input.rx_bytes;
+        }
+    }
+    else {
+        mtos_uart_vessel_t new = {};
+        ESP_LOGD("ultradbg","[[[[[[[[QUEUE SENDIG FROM read_bytes > uart_main]]]]]]]]");
+        if (xQueueSend(mtos_uart_queue,&input,CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) == pdTRUE) {
+            ESP_LOGD("ultradbg","/vessel sended\\");
+            if (ulTaskNotifyTake(pdTRUE,2*CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) == 0) return *input.rx_bytes; // espero a uart_main haya mandado al queue
+            ESP_LOGD("ultradbg","/notif recieved\\");
+            ESP_LOGD("ultradbg","messages waiting now: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+            ESP_LOGD("ultradbg","[[[[[[[[RECIEVING QUEUE FROM uart_main > read_bytes]]]]]]]]");
+            if (xQueueReceive(mtos_uart_queue,&new,2*CONFIG_MTOS_UART_STEP_MS/portTICK_PERIOD_MS) == pdTRUE) {
+                xTaskNotifyGive(new.th); // desbloqueo uart_main luego de haber tomado el queue
+                ESP_LOGD("ultradbg","/uart_main restored\\");
+                if (new.th == input.th) {
+                    ESP_LOGD("ultradbg","llego un vessel que no es el que corresponde\n");
+                    ESP_LOGD("ultradbg","/abort: returning input\\");
+                    return *input.rx_bytes;
+                }
+                else {
+                    ESP_LOGD("ultradbg","llego un vessel correspondiente\n");
+                }
+                ESP_LOGD("ultradbg","/vessel recieved back\\");
+                ESP_LOGD("ultradbg","messages waiting now: %u",uxQueueMessagesWaiting(mtos_uart_queue));
+            }
+            else {
+                ESP_LOGD("ultradbg","/abort: no vessel recieved\\");
+                return *input.rx_bytes;
+            }
+            return *new.rx_bytes;
+        }
+        return *input.rx_bytes;
+    }
 }
 
 static void mtos_send_bytes(char* token, mtos_header_t* header, void* chunk, size_t len)
@@ -718,6 +778,7 @@ static void mtos_slave_task(void* pvParameters)
     char *TAG = "mtos_slave";
     uint8_t *buffer = (uint8_t*)malloc(MTOS_BUFFER_SLAVE); // reservar bloque de datos donde se recibiran los comandos del maestro
     uint8_t *ptr = buffer; // puntero de posicion
+    TaskHandle_t master_task_handle = (TaskHandle_t)pvParameters;
     size_t rx_bytes = 0; // cantidad de bytes recibidos por uart
     mtos_list_t* node = NULL; // puntero donde se cargara el nodo a procesar
     size_t chunk_limit = MTOS_BUFFER_AVAILABLE;
@@ -731,7 +792,7 @@ static void mtos_slave_task(void* pvParameters)
     MTOS_EVT_POST(MTOS_EVENT_SLAVE_INITED,NULL,0);
     for(;;) {
         // if timeout abort
-        if ((MILLIS(to) > uart_timeout_limit)&&(status != MTOS_SLAVE_IDLE)) {
+        if ((MILLIS(to) > uart_slave_timeout)&&(status != MTOS_SLAVE_IDLE)) {
             ESP_LOGI(TAG,"timeout expired");
             status = MTOS_SLAVE_ABORT;
             MTOS_EVT_POST(MTOS_EVENT_SLAVE_TIMEOUT,(node?node->name:NULL),(node?sizeof(((mtos_list_t*)0)->name):0));
@@ -754,7 +815,9 @@ static void mtos_slave_task(void* pvParameters)
         ptr = buffer;
 
         // se leen mas datos de uart para que esten disponibles en el proximo ciclo
+        ulTaskNotifyTake(pdTRUE,0);
         mtos_read_bytes(buffer,&rx_bytes,ptr);
+        xTaskNotifyGive(master_task_handle);
 
         if (rx_bytes > sizeof(mtos_header_t)) {
             ESP_LOGI(TAG,"suficientes bytes para analizar");
@@ -830,7 +893,7 @@ static void mtos_slave_task(void* pvParameters)
                         ESP_LOGI(TAG,"falltrough con status en MTOS_SLAVE_ABORT se aborta");
                         break;
                     }
-                    if (xSemaphoreTake(node->smphr, (uart_timeout_limit)/portTICK_PERIOD_MS) != pdTRUE) {
+                    if (xSemaphoreTake(node->smphr, (uart_slave_timeout)/portTICK_PERIOD_MS) != pdTRUE) {
                         ESP_LOGI(TAG,"no se pudo tomar el semaforo a tiempo");
                         status = MTOS_SLAVE_ABORT;
                         break;
@@ -935,7 +998,8 @@ static void mtos_slave_task(void* pvParameters)
 static void mtos_master_task(void *pvParameters)
 {
     char *TAG = "mtos_master";
-    TaskHandle_t tx_task;
+    TaskHandle_t slave_task_handle;
+    TaskHandle_t master_task_handle = xTaskGetCurrentTaskHandle();
     uint8_t *buffer = (uint8_t*)malloc(MTOS_BUFFER_EFFECTIVE); // reservar bloque de datos donde se recibiran los bloques enviados por uart
     uint8_t *ptr = buffer; // puntero a una posicion dentro del bloque reservado
     uint8_t *acc = NULL;  // acumulador de chunks
@@ -950,23 +1014,24 @@ static void mtos_master_task(void *pvParameters)
     size_t token_len = 0; // largo del string que se desea buscar en el buffer de datos recibidos
     assert(buffer);
     for(;;) {
-        xTaskCreate(mtos_slave_task, "mtos_slv", 4096, NULL, uxTaskPriorityGet(NULL)-1, &tx_task);
+        xTaskCreate(mtos_slave_task, "mtos_slv", 4096, (void*)master_task_handle, uxTaskPriorityGet(NULL)-1, &slave_task_handle);
         MTOS_EVT_POST(MTOS_EVENT_MASTER_IDLE,(node?node->name:NULL),(node?sizeof(((mtos_list_t*)0)->name):0));
         xQueueReceive(mtos_call_queue,&node,portMAX_DELAY);
         MTOS_EVT_POST(MTOS_EVENT_MASTER_CALL,node->name,sizeof(((mtos_list_t*)0)->name));
         ESP_LOGI(TAG,"node recibido por queue");
-        vTaskDelete(tx_task); //porque no puede recibir un bloque mientras esta enviando otro
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+        vTaskDelete(slave_task_handle); //porque no puede recibir un bloque mientras esta enviando otro
         to = MILLIS(0);
         ESP_LOGI(TAG,"timeout reset");
-        xSemaphoreTake(node->smphr, (uart_timeout_limit+10)/portTICK_PERIOD_MS);
+        xSemaphoreTake(node->smphr, (uart_master_timeout+10)/portTICK_PERIOD_MS);
+        ESP_LOGI(TAG,"node smphr taken");
         for(;;) {
             // if timeout abort
-            if (MILLIS(to) > uart_timeout_limit) {
+            if (MILLIS(to) > uart_master_timeout) {
                 ESP_LOGI(TAG,"timeout expired");
                 status = MTOS_MASTER_ABORT;
                 MTOS_EVT_POST(MTOS_EVENT_MASTER_TIMEOUT,node->name,sizeof(((mtos_list_t*)0)->name));
             }
-
             // si el puntero ptr avanzo
             if (buffer < ptr) {
                 ESP_LOGI(TAG,"buffer < ptr, se elimina %u bytes procesados",ptr-buffer);
@@ -1221,21 +1286,21 @@ mtos_event_handler_t mtos_usr_cb = NULL;
 static void mtos_cb_handler_intern(void* handler_args, esp_event_base_t base, int32_t id, void* event_data)
 {
     if (mtos_usr_cb) {
-        mtos_usr_cb(id,event_data);
+        mtos_usr_cb(id,event_data,handler_args);
     }
 }
 
-void mtos_init(mtos_event_handler_t evt_callback) {
+void mtos_init(mtos_event_handler_t evt_callback, void* usr_data) {
     mtos_usr_cb = evt_callback;
     esp_event_loop_args_t mtos_loop_args = {
         .queue_size = CONFIG_MTOS_EVT_QUEUE_SIZE,
         .task_name = "mtos_evt_task", // task will be created
         .task_priority = uxTaskPriorityGet(NULL),
-        .task_stack_size = 2048,
+        .task_stack_size = 4096,
         .task_core_id = tskNO_AFFINITY
     };
     ESP_ERROR_CHECK(esp_event_loop_create(&mtos_loop_args, &mtos_loop_handle));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register_with(mtos_loop_handle, MTOS_EVENTS, ESP_EVENT_ANY_ID, mtos_cb_handler_intern, mtos_loop_handle, NULL)); //puntero a los datos
+    ESP_ERROR_CHECK(esp_event_handler_instance_register_with(mtos_loop_handle, MTOS_EVENTS, ESP_EVENT_ANY_ID, mtos_cb_handler_intern, usr_data, NULL)); //puntero a los datos
 
     mtos_call_queue = xQueueCreate(CONFIG_MTOS_CALL_QUEUE_LENGTH,sizeof(mtos_list_t*));
     mtos_uart_queue = xQueueCreate(CONFIG_MTOS_CALL_QUEUE_LENGTH,sizeof(mtos_uart_vessel_t));

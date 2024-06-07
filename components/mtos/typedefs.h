@@ -34,4 +34,4 @@ typedef union {
 } mtos_event_chunk_t;
 
 
-typedef void (*mtos_event_handler_t)(mtos_event_id_t event_id, void* event_data);
+typedef void (*mtos_event_handler_t)(mtos_event_id_t event_id, void* event_data, void* user_data);
